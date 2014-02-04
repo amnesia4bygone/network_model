@@ -39,40 +39,6 @@ int fd_used_init = 0;  // 用来回避 eventfd 的 init value， 多一次 read 
 //#define handle_error(msg)  do { perror(msg); exit(EXIT_FAILURE); } while (0)
 
 
-void * child_main(void* args)
-{
-    // child init
-    unsigned int * p = (unsigned int *)args;
-    unsigned int offset = *p; 
-
-
-
-    while(1)
-    {
-        ssize_t s;
-        uint64_t u;
-
-        s = read( event_fd_set[offset]  , &u, sizeof(uint64_t));
-        if (s != sizeof(uint64_t))
-                handle_error("read");
-
-        int con_fd =  int( u );
-
-        if (u == fd_used_init)
-        {
-            //printf("first eventfd, skip it\n");
-            continue;
-        }
-
-        if (debug)  printf("read offset:%d  data: (0x%lld)\n",    offset, (unsigned long long) u);
-
-        //int fd = (int) u;
-        //close(fd);
-    }
-
-
-}
-
 
 
 struct sock_ev {
@@ -89,6 +55,40 @@ void release_sock_event(struct sock_ev* ev)
     free(ev->buffer);
     free(ev);
 }
+
+
+
+// 从 eventfd 里面读取需要处理的 socket
+void on_parse_socket(int sock, short event, void* arg)
+{
+    unsigned int * p = (unsigned int *)arg;
+    unsigned int offset = *p; 
+
+
+    ssize_t s;
+    uint64_t u;
+
+    s = read( sock  , &u, sizeof(uint64_t));
+    if (s != sizeof(uint64_t))
+            handle_error("read");
+    int con_fd =  int( u );
+
+    if (u == fd_used_init)
+    {
+        return;
+    }
+
+    if(debug) printf("read offset:%d  data: (0x%lld)\n",    offset, (unsigned long long) u);
+
+
+    
+
+    struct sock_ev* ev = (struct sock_ev*)malloc(sizeof(struct sock_ev));
+    ev->read_ev = (struct event*)malloc(sizeof(struct event));
+    ev->write_ev = (struct event*)malloc(sizeof(struct event));
+
+}
+
 
 void on_write(int sock, short event, void* arg)
 {
@@ -131,9 +131,6 @@ void on_accept(int sock, short event, void* arg)
 {
     struct sockaddr_in cli_addr;
     int newfd, sin_size;
-    struct sock_ev* ev = (struct sock_ev*)malloc(sizeof(struct sock_ev));
-    ev->read_ev = (struct event*)malloc(sizeof(struct event));
-    ev->write_ev = (struct event*)malloc(sizeof(struct event));
     sin_size = sizeof(struct sockaddr_in);
     newfd = accept(sock, (struct sockaddr*)&cli_addr, (socklen_t *)&sin_size);
 
@@ -156,6 +153,55 @@ void on_accept(int sock, short event, void* arg)
     */
 
 }
+
+
+
+void * child_main(void* args)
+{
+    // child init
+    unsigned int * p = (unsigned int *)args;
+    unsigned int offset = *p; 
+
+
+    /*
+        while(1)
+        {
+            ssize_t s;
+            uint64_t u;
+
+            s = read( event_fd_set[offset]  , &u, sizeof(uint64_t));
+            if (s != sizeof(uint64_t))
+                    handle_error("read");
+
+            int con_fd =  int( u );
+
+            if (u == fd_used_init)
+            {
+                //printf("first eventfd, skip it\n");
+                continue;
+            }
+
+            if (debug)  printf("read offset:%d  data: (0x%lld)\n",    offset, (unsigned long long) u);
+        }
+    */
+
+    struct event_base * work_base = event_base_new();
+
+    struct event * parse_sock_ev;
+    parse_sock_ev = event_new( work_base, event_fd_set[offset], EV_READ|EV_PERSIST, on_parse_socket,  args   );
+    event_add(parse_sock_ev, NULL);
+
+    event_base_dispatch(work_base);
+
+    
+    event_free(parse_sock_ev);
+
+}
+
+
+
+
+
 
 int main(int argc, char* argv[])
 {
@@ -228,5 +274,6 @@ int main(int argc, char* argv[])
     */
     event_base_dispatch(base);
 
+    event_free(listen_ev);
     return 0;
 }
