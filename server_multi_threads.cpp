@@ -28,7 +28,7 @@ unsigned int g_offset = 0;
 
 // 工作线程相关的配置文件
 const unsigned int THREAD_NUMBER =  24;
-struct event_base*  work_base[ THREAD_NUMBER ];
+struct event_base*  work_bases[ THREAD_NUMBER ];
 int event_fd_set [THREAD_NUMBER];
 unsigned int thread_offset [THREAD_NUMBER];
 
@@ -44,18 +44,57 @@ int fd_used_init = 0;  // 用来回避 eventfd 的 init value， 多一次 read 
 struct sock_ev {
     struct event* read_ev;
     struct event* write_ev;
-    char* buffer;
+    char* read_buffer;
+
 };
 
 void release_sock_event(struct sock_ev* ev)
 {
-    event_del(ev->read_ev);
-    free(ev->read_ev);
-    free(ev->write_ev);
-    free(ev->buffer);
-    free(ev);
+    if(ev->read_ev)  event_del(ev->read_ev);
+
+    if(ev->read_ev)  event_free(ev->read_ev);
+    if(ev->write_ev)  event_free(ev->write_ev);
+
+    if(ev->read_buffer)  free(ev->read_buffer);
+    if(ev)  free(ev);
 }
 
+
+
+
+void on_write(int sock, short event, void* arg)
+{
+    char* buffer = (char*)arg;
+    send(sock, buffer, strlen(buffer), 0);
+
+    free(buffer);
+}
+
+void on_read(int sock, short event, void* arg)
+{
+    int size;
+    struct sock_ev* ev = (struct sock_ev*)arg;
+    ev->read_buffer = (char*)malloc(MEM_SIZE);
+    bzero(ev->read_buffer, MEM_SIZE);
+    size = recv(sock, ev->read_buffer, MEM_SIZE, 0);
+    
+    //
+    // 这里. read_ev 没有删除, 所以一直会读到size==0, 这里删除.
+    // 所以 releaes_sock_event 没有删除 buffer 的操作.  
+    // 真实的情况要复杂的多. a） 管道破裂； b） 慢速 socket 数据慢的问题
+    //
+    if (size == 0) {
+        release_sock_event(ev);
+        close(sock);
+        return;
+    }
+    printf("receive data:%s, size:%d\n", ev->read_buffer, size);
+
+    // TODO:
+    //ev->write_ev = event_new( work_bases[offset], sock,   EV_WRITE, on_write, (void*) ev->read_buffer );
+    //event_add(ev->write_ev, NULL);
+
+}
 
 
 // 从 eventfd 里面读取需要处理的 socket
@@ -81,47 +120,17 @@ void on_parse_socket(int sock, short event, void* arg)
     if(debug) printf("read offset:%d  data: (0x%lld)\n",    offset, (unsigned long long) u);
 
 
-    
+
 
     struct sock_ev* ev = (struct sock_ev*)malloc(sizeof(struct sock_ev));
-    ev->read_ev = (struct event*)malloc(sizeof(struct event));
-    ev->write_ev = (struct event*)malloc(sizeof(struct event));
+    memset(ev, 0, sizeof(sock_ev) );
+
+    ev->read_ev = event_new( work_bases[offset], con_fd,   EV_READ|EV_PERSIST, on_read, (void*) ev );
+    event_add(ev->read_ev, NULL);
 
 }
 
 
-void on_write(int sock, short event, void* arg)
-{
-    char* buffer = (char*)arg;
-    send(sock, buffer, strlen(buffer), 0);
-
-    free(buffer);
-}
-
-void on_read(int sock, short event, void* arg)
-{
-    struct event* write_ev;
-    int size;
-    struct sock_ev* ev = (struct sock_ev*)arg;
-    ev->buffer = (char*)malloc(MEM_SIZE);
-    bzero(ev->buffer, MEM_SIZE);
-    size = recv(sock, ev->buffer, MEM_SIZE, 0);
-    printf("receive data:%s, size:%d\n", ev->buffer, size);
-
-    //
-    // 这里. read_ev 没有删除, 所以一直会读到size==0, 这里删除.
-    // 所以 releaes_sock_event 没有删除 buffer 的操作.  
-    // 真实的情况要复杂的多. a） 管道破裂； b） 慢速 socket 数据慢的问题
-    //
-    if (size == 0) {
-        release_sock_event(ev);
-        close(sock);
-        return;
-    }
-    event_set(ev->write_ev, sock, EV_WRITE, on_write, ev->buffer);
-    event_base_set(base, ev->write_ev);
-    event_add(ev->write_ev, NULL);
-}
 
 
 
@@ -145,12 +154,8 @@ void on_accept(int sock, short event, void* arg)
           handle_error("write");
     if (debug) printf("write offset:%d  data: (%lld)\n",    g_offset, (unsigned long long) u);
 
+    // simple round robin
     g_offset = (g_offset+1) % THREAD_NUMBER;
-    /*
-        event_set(ev->read_ev, newfd, EV_READ|EV_PERSIST, on_read, ev);
-        event_base_set(base, ev->read_ev);
-        event_add(ev->read_ev, NULL);
-    */
 
 }
 
@@ -163,37 +168,15 @@ void * child_main(void* args)
     unsigned int offset = *p; 
 
 
-    /*
-        while(1)
-        {
-            ssize_t s;
-            uint64_t u;
-
-            s = read( event_fd_set[offset]  , &u, sizeof(uint64_t));
-            if (s != sizeof(uint64_t))
-                    handle_error("read");
-
-            int con_fd =  int( u );
-
-            if (u == fd_used_init)
-            {
-                //printf("first eventfd, skip it\n");
-                continue;
-            }
-
-            if (debug)  printf("read offset:%d  data: (0x%lld)\n",    offset, (unsigned long long) u);
-        }
-    */
-
-    struct event_base * work_base = event_base_new();
+    work_bases[offset] = event_base_new();
 
     struct event * parse_sock_ev;
-    parse_sock_ev = event_new( work_base, event_fd_set[offset], EV_READ|EV_PERSIST, on_parse_socket,  args   );
+    parse_sock_ev = event_new( work_bases[offset], event_fd_set[offset], EV_READ|EV_PERSIST, on_parse_socket,  args   );
     event_add(parse_sock_ev, NULL);
 
-    event_base_dispatch(work_base);
+    event_base_dispatch(work_bases[offset]);
 
-    
+
     event_free(parse_sock_ev);
 
 }
@@ -259,19 +242,13 @@ int main(int argc, char* argv[])
 
 
     // 接收请求的线程相关的初始化
-   
     base = event_base_new();
 
     struct event * listen_ev;
     listen_ev = event_new( base, sock, EV_READ|EV_PERSIST, on_accept, NULL);
     event_add(listen_ev, NULL);
 
-    /*
-      老代码， 废弃
-    event_set(&listen_ev, sock, EV_READ|EV_PERSIST, on_accept, NULL);
-    event_base_set(base, &listen_ev);
-    event_add(&listen_ev, NULL);
-    */
+
     event_base_dispatch(base);
 
     event_free(listen_ev);

@@ -45,7 +45,7 @@ void on_read(int sock, short event, void* arg)
     ev->buffer = (char*)malloc(MEM_SIZE);
     bzero(ev->buffer, MEM_SIZE);
     size = recv(sock, ev->buffer, MEM_SIZE, 0);
-    printf("receive data:%s, size:%d\n", ev->buffer, size);
+    
 
     //
     // 这里. read_ev 没有删除, 所以一直会读到size==0, 这里删除.
@@ -57,6 +57,7 @@ void on_read(int sock, short event, void* arg)
         close(sock);
         return;
     }
+    printf("receive data:%s, size:%d\n", ev->buffer, size);
     event_set(ev->write_ev, sock, EV_WRITE, on_write, ev->buffer);
     event_base_set(base, ev->write_ev);
     event_add(ev->write_ev, NULL);
