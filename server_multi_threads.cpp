@@ -60,7 +60,7 @@ void * child_main(void* args)
 
         if (u == fd_used_init)
         {
-            printf("first eventfd, skip it\n");
+            //printf("first eventfd, skip it\n");
             continue;
         }
 
@@ -111,7 +111,7 @@ void on_read(int sock, short event, void* arg)
     //
     // 这里. read_ev 没有删除, 所以一直会读到size==0, 这里删除.
     // 所以 releaes_sock_event 没有删除 buffer 的操作.  
-    // 真实的情况要复杂的多.
+    // 真实的情况要复杂的多. a） 管道破裂； b） 慢速 socket 数据慢的问题
     //
     if (size == 0) {
         release_sock_event(ev);
@@ -199,8 +199,6 @@ int main(int argc, char* argv[])
             handle_error("eventfd");
         }
     }
-    printf("1111\n");
-
 
     pthread_t pt[THREAD_NUMBER]; 
     memset(pt, 0, sizeof(pt));
@@ -212,15 +210,22 @@ int main(int argc, char* argv[])
             return -1;
         }
     }
-    printf("2222\n");
 
 
     // 接收请求的线程相关的初始化
-    struct event listen_ev;
+   
     base = event_base_new();
+
+    struct event * listen_ev;
+    listen_ev = event_new( base, sock, EV_READ|EV_PERSIST, on_accept, NULL);
+    event_add(listen_ev, NULL);
+
+    /*
+      老代码， 废弃
     event_set(&listen_ev, sock, EV_READ|EV_PERSIST, on_accept, NULL);
     event_base_set(base, &listen_ev);
     event_add(&listen_ev, NULL);
+    */
     event_base_dispatch(base);
 
     return 0;
