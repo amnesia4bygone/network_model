@@ -45,7 +45,7 @@ struct sock_ev {
     struct event* read_ev;
     struct event* write_ev;
     char* read_buffer;
-
+    struct event_base* one_work_base;
 };
 
 void release_sock_event(struct sock_ev* ev)
@@ -57,6 +57,8 @@ void release_sock_event(struct sock_ev* ev)
 
     if(ev->read_buffer)  free(ev->read_buffer);
     if(ev)  free(ev);
+
+    ev->one_work_base = NULL;
 }
 
 
@@ -64,10 +66,20 @@ void release_sock_event(struct sock_ev* ev)
 
 void on_write(int sock, short event, void* arg)
 {
-    char* buffer = (char*)arg;
-    send(sock, buffer, strlen(buffer), 0);
+    // check 数据完整性， 再继续
 
-    free(buffer);
+    /*********************************
+     *
+     *    业务逻辑在这里, 不能 read。 否则一半的数据无法处理。
+     *
+     *********************************/
+
+    struct sock_ev* ev = (struct sock_ev*) arg;
+
+    send(sock, "ack:", 4, 0);
+    send(sock, ev->read_buffer, strlen(ev->read_buffer), 0);
+
+    free(ev->read_buffer);
 }
 
 void on_read(int sock, short event, void* arg)
@@ -82,17 +94,19 @@ void on_read(int sock, short event, void* arg)
     // 这里. read_ev 没有删除, 所以一直会读到size==0, 这里删除.
     // 所以 releaes_sock_event 没有删除 buffer 的操作.  
     // 真实的情况要复杂的多. a） 管道破裂； b） 慢速 socket 数据慢的问题
-    //
+    // 对应的 read_buffer如何去弄， 这里都没有考虑
+    // 
     if (size == 0) {
+        //printf("MISS:　receive data:%s, size:%d\n", ev->read_buffer, size);
         release_sock_event(ev);
         close(sock);
         return;
     }
-    printf("receive data:%s, size:%d\n", ev->read_buffer, size);
+    if(debug) printf("receive data:%s, size:%d\n", ev->read_buffer, size);
 
-    // TODO:
-    //ev->write_ev = event_new( work_bases[offset], sock,   EV_WRITE, on_write, (void*) ev->read_buffer );
-    //event_add(ev->write_ev, NULL);
+
+    ev->write_ev = event_new( ev->one_work_base, sock,   EV_WRITE, on_write, (void*) ev );
+    event_add(ev->write_ev, NULL);
 
 }
 
@@ -124,6 +138,7 @@ void on_parse_socket(int sock, short event, void* arg)
 
     struct sock_ev* ev = (struct sock_ev*)malloc(sizeof(struct sock_ev));
     memset(ev, 0, sizeof(sock_ev) );
+    ev->one_work_base = work_bases[offset];
 
     ev->read_ev = event_new( work_bases[offset], con_fd,   EV_READ|EV_PERSIST, on_read, (void*) ev );
     event_add(ev->read_ev, NULL);

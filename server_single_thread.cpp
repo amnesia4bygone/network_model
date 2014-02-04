@@ -25,16 +25,22 @@ void release_sock_event(struct sock_ev* ev)
     event_del(ev->read_ev);
     free(ev->read_ev);
     free(ev->write_ev);
+  
+    // 每一次进入 on_read 都会 malloc， 这不会发生 double free
     free(ev->buffer);
     free(ev);
 }
 
 void on_write(int sock, short event, void* arg)
 {
-    char* buffer = (char*)arg;
-    send(sock, buffer, strlen(buffer), 0);
+    struct sock_ev * ev = (struct sock_ev*)arg;
+    //char* buffer = (char*)arg;
 
-    free(buffer);
+    send(sock, "ack:", 4, 0);
+    send(sock, ev->buffer, strlen(ev->buffer), 0);
+
+    free(ev->buffer);
+    ev->buffer = NULL;
 }
 
 void on_read(int sock, short event, void* arg)
@@ -58,7 +64,7 @@ void on_read(int sock, short event, void* arg)
         return;
     }
     printf("receive data:%s, size:%d\n", ev->buffer, size);
-    event_set(ev->write_ev, sock, EV_WRITE, on_write, ev->buffer);
+    event_set(ev->write_ev, sock, EV_WRITE, on_write, ev);
     event_base_set(base, ev->write_ev);
     event_add(ev->write_ev, NULL);
 }
