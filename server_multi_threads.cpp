@@ -3,6 +3,8 @@
 #include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <errno.h>
+#include <signal.h>
 
 #include <string.h>
 #include <unistd.h>
@@ -10,6 +12,7 @@
 #include <pthread.h>
 #include <sys/eventfd.h>
 
+#include <unistd.h>
 
 #include "event.h"
 
@@ -45,8 +48,12 @@ struct sock_ev {
     struct event* read_ev;
     struct event* write_ev;
     char* read_buffer;
-    struct event_base* one_work_base;
+
+    int offset;
 };
+
+
+
 
 void release_sock_event(struct sock_ev* ev)
 {
@@ -56,9 +63,13 @@ void release_sock_event(struct sock_ev* ev)
     if(ev->write_ev)  event_free(ev->write_ev);
 
     if(ev->read_buffer)  free(ev->read_buffer);
+    ev->read_buffer = NULL;
+
+
+    ev->offset = -1;
+
     if(ev)  free(ev);
 
-    ev->one_work_base = NULL;
 }
 
 
@@ -66,7 +77,9 @@ void release_sock_event(struct sock_ev* ev)
 
 void on_write(int sock, short event, void* arg)
 {
-    // check 数据完整性， 再继续
+    /* check 数据完整性， 再继续.   */
+
+    usleep(1000);
 
     /*********************************
      *
@@ -76,20 +89,34 @@ void on_write(int sock, short event, void* arg)
 
     struct sock_ev* ev = (struct sock_ev*) arg;
 
+    // test: send ack + origin msg back
     send(sock, "ack:", 4, 0);
     send(sock, ev->read_buffer, strlen(ev->read_buffer), 0);
 
     free(ev->read_buffer);
+    ev->read_buffer = NULL;
 }
+
 
 void on_read(int sock, short event, void* arg)
 {
     int size;
     struct sock_ev* ev = (struct sock_ev*)arg;
+
+    /* 真实的场景， 应该是只申请一次 */
     ev->read_buffer = (char*)malloc(MEM_SIZE);
     bzero(ev->read_buffer, MEM_SIZE);
     size = recv(sock, ev->read_buffer, MEM_SIZE, 0);
     
+    if (size < 0)
+    {
+        // deal with "connection reset by peer", errno==104
+        //printf("-------------ERROR:　%d, offset %d \n", errno, ev->offset);
+        release_sock_event(ev);
+        close(sock);
+        return;        
+    }
+
     //
     // 这里. read_ev 没有删除, 所以一直会读到size==0, 这里删除.
     // 所以 releaes_sock_event 没有删除 buffer 的操作.  
@@ -97,15 +124,16 @@ void on_read(int sock, short event, void* arg)
     // 对应的 read_buffer如何去弄， 这里都没有考虑
     // 
     if (size == 0) {
-        //printf("MISS:　receive data:%s, size:%d\n", ev->read_buffer, size);
+        if (errno != 0)
+            printf("----------MISS: %d　offset %d, receive data:%s, size:%d\n", errno, ev->offset, ev->read_buffer, size);
         release_sock_event(ev);
         close(sock);
         return;
     }
-    if(debug) printf("receive data:%s, size:%d\n", ev->read_buffer, size);
+    if(debug)  printf("offset %d receive data:%s, size:%d\n",ev->offset, ev->read_buffer, size);
 
 
-    ev->write_ev = event_new( ev->one_work_base, sock,   EV_WRITE, on_write, (void*) ev );
+    ev->write_ev = event_new( work_bases[ev->offset], sock,   EV_WRITE, on_write, (void*) ev );
     event_add(ev->write_ev, NULL);
 
 }
@@ -138,7 +166,7 @@ void on_parse_socket(int sock, short event, void* arg)
 
     struct sock_ev* ev = (struct sock_ev*)malloc(sizeof(struct sock_ev));
     memset(ev, 0, sizeof(sock_ev) );
-    ev->one_work_base = work_bases[offset];
+    ev->offset = offset;
 
     ev->read_ev = event_new( work_bases[offset], con_fd,   EV_READ|EV_PERSIST, on_read, (void*) ev );
     event_add(ev->read_ev, NULL);
@@ -203,7 +231,7 @@ void * child_main(void* args)
 
 int main(int argc, char* argv[])
 {
-
+    signal(SIGPIPE,  SIG_IGN);
 
 
     struct sockaddr_in my_addr;
