@@ -18,7 +18,9 @@
 
 #define PORT        25341
 #define BACKLOG     5
-#define MEM_SIZE    1024
+
+
+const unsigned int  MEM_SIZE  =   1024;
 
 int debug = 0;
 
@@ -44,32 +46,49 @@ int fd_used_init = 0;  // 用来回避 eventfd 的 init value， 多一次 read 
 
 
 
-struct sock_ev {
+class sock_ev {
+public:
     struct event* read_ev;
     struct event* write_ev;
     char* read_buffer;
 
     int offset;
+
+    sock_ev();
+    ~sock_ev();
+
 };
 
+sock_ev::sock_ev()
+{
+    read_ev = NULL;
+    write_ev = NULL;
+
+    //TODO: do it in init(), deal with read_buffer == NULL 
+    read_buffer = (char*) malloc(MEM_SIZE);
+    memset(read_buffer, 0,  MEM_SIZE);
+
+    offset = -1;
+}
+
+sock_ev::~sock_ev()
+{
+    free(read_buffer);
+    read_buffer = NULL;
+
+    offset = -1;
+}
 
 
 
-void release_sock_event(struct sock_ev* ev)
+void release_sock_event(sock_ev* ev)
 {
     if(ev->read_ev)  event_del(ev->read_ev);
 
     if(ev->read_ev)  event_free(ev->read_ev);
     if(ev->write_ev)  event_free(ev->write_ev);
 
-    if(ev->read_buffer)  free(ev->read_buffer);
-    ev->read_buffer = NULL;
-
-
-    ev->offset = -1;
-
-    if(ev)  free(ev);
-
+    delete ev;
 }
 
 
@@ -77,39 +96,44 @@ void release_sock_event(struct sock_ev* ev)
 
 void on_write(int sock, short event, void* arg)
 {
-    /* check 数据完整性， 再继续.   */
-
-    usleep(1000);
+    /* check 数据完整性， 再继续.  一般而言是数据长度在包头 */
+    /* deal with long connection */
 
     /*********************************
      *
-     *    业务逻辑在这里, 不能 read。 否则一半的数据无法处理。
+     *    业务逻辑在这里, 不能在 on_read。 否则遇到一半的数据时候， 无法处理。
      *
      *********************************/
 
-    struct sock_ev* ev = (struct sock_ev*) arg;
+    sock_ev* ev = ( sock_ev*) arg;
 
     // test: send ack + origin msg back
     send(sock, "ack:", 4, 0);
     send(sock, ev->read_buffer, strlen(ev->read_buffer), 0);
 
-    free(ev->read_buffer);
-    ev->read_buffer = NULL;
 }
 
 
 void on_read(int sock, short event, void* arg)
 {
     int size;
-    struct sock_ev* ev = (struct sock_ev*)arg;
+    sock_ev* ev = (sock_ev*)arg;
 
-    /* 真实的场景， 应该是只申请一次 */
-    ev->read_buffer = (char*)malloc(MEM_SIZE);
-    bzero(ev->read_buffer, MEM_SIZE);
-    size = recv(sock, ev->read_buffer, MEM_SIZE, 0);
+
+    unsigned int read_len = strlen(ev->read_buffer);
+    char * p = ev->read_buffer + read_len;
+
+
+    size = recv(sock, p,  MEM_SIZE -  read_len , 0);
     
     if (size < 0)
     {
+        if (errno==EINTR ) 
+        {
+            printf("-------------EINTR:　%d, offset %d \n", errno, ev->offset);
+            return ;
+        }
+
         // deal with "connection reset by peer", errno==104
         //printf("-------------ERROR:　%d, offset %d \n", errno, ev->offset);
         release_sock_event(ev);
@@ -119,20 +143,21 @@ void on_read(int sock, short event, void* arg)
 
     //
     // 这里. read_ev 没有删除, 所以一直会读到size==0, 这里删除.
-    // 所以 releaes_sock_event 没有删除 buffer 的操作.  
     // 真实的情况要复杂的多. a） 管道破裂； b） 慢速 socket 数据慢的问题
     // 对应的 read_buffer如何去弄， 这里都没有考虑
     // 
     if (size == 0) {
         if (errno != 0)
-            printf("----------MISS: %d　offset %d, receive data:%s, size:%d\n", errno, ev->offset, ev->read_buffer, size);
+        {
+            //printf("----------MISS: %d　offset %d, receive data:%s, size:%d\n", errno, ev->offset, ev->read_buffer, size);
+        }
         release_sock_event(ev);
         close(sock);
         return;
     }
     if(debug)  printf("offset %d receive data:%s, size:%d\n",ev->offset, ev->read_buffer, size);
 
-
+    // 最后一次完整的读， 肯定会触发到这里。
     ev->write_ev = event_new( work_bases[ev->offset], sock,   EV_WRITE, on_write, (void*) ev );
     event_add(ev->write_ev, NULL);
 
@@ -162,10 +187,10 @@ void on_parse_socket(int sock, short event, void* arg)
     if(debug) printf("read offset:%d  data: (0x%lld)\n",    offset, (unsigned long long) u);
 
 
+    sock_ev* ev = new sock_ev();
+    if (ev == NULL)
+        return;
 
-
-    struct sock_ev* ev = (struct sock_ev*)malloc(sizeof(struct sock_ev));
-    memset(ev, 0, sizeof(sock_ev) );
     ev->offset = offset;
 
     ev->read_ev = event_new( work_bases[offset], con_fd,   EV_READ|EV_PERSIST, on_read, (void*) ev );
@@ -196,6 +221,7 @@ void on_accept(int sock, short event, void* arg)
     if (s != sizeof(uint64_t))
           handle_error("write");
     if (debug) printf("write offset:%d  data: (%lld)\n",    g_offset, (unsigned long long) u);
+
 
     // simple round robin
     g_offset = (g_offset+1) % THREAD_NUMBER;
