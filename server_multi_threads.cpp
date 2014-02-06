@@ -128,9 +128,9 @@ void on_read(int sock, short event, void* arg)
     
     if (size < 0)
     {
-        if (errno==EINTR ) 
+        if (errno==EINTR || errno == EWOULDBLOCK || errno == EAGAIN ) 
         {
-            printf("-------------EINTR:　%d, offset %d \n", errno, ev->offset);
+            //printf("-------------EINTR:　%d, offset %d \n", errno, ev->offset);
             return ;
         }
 
@@ -211,6 +211,7 @@ void on_accept(int sock, short event, void* arg)
     sin_size = sizeof(struct sockaddr_in);
     newfd = accept(sock, (struct sockaddr*)&cli_addr, (socklen_t *)&sin_size);
 
+    evutil_make_socket_nonblocking(newfd);
 
     // here write to work threads round-robin
     unsigned long long u;
@@ -264,6 +265,10 @@ int main(int argc, char* argv[])
     int sock;
 
     sock = socket(AF_INET, SOCK_STREAM, 0);
+
+    // NONBLOCK
+    evutil_make_socket_nonblocking(sock);
+
     int yes = 1;
     setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int));
     memset(&my_addr, 0, sizeof(my_addr));
@@ -272,7 +277,6 @@ int main(int argc, char* argv[])
     my_addr.sin_addr.s_addr = INADDR_ANY;
     bind(sock, (struct sockaddr*)&my_addr, sizeof(struct sockaddr));
     listen(sock, BACKLOG);
-
 
 
 
